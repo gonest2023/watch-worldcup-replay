@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Iterable
 from urllib.parse import urljoin
@@ -45,6 +46,7 @@ SCORE_PATTERNS = (
 class MatchLink:
     title: str
     url: str
+    match_date: date | None = None
 
 
 def import_playwright():
@@ -128,11 +130,24 @@ function looksLikeVideo(text, href) {
 }
 
 async function collectLinks(page) {
-  const anchors = await page.locator('a').evaluateAll(els => els.map(a => ({
-    text: (a.innerText || a.textContent || a.title || '').trim(),
-    href: a.href || a.getAttribute('href') || '',
-    title: a.title || ''
-  })));
+  const anchors = await page.locator('a').evaluateAll(els => els.map(a => {
+    // 从父级 .section-container 中提取日期
+    let p = a;
+    let dateText = '';
+    while (p) {
+      if (p.classList && p.classList.contains('section-container')) {
+        dateText = (p.innerText || '').substring(0, 80);
+        break;
+      }
+      p = p.parentElement;
+    }
+    return {
+      text: (a.innerText || a.textContent || a.title || '').trim(),
+      href: a.href || a.getAttribute('href') || '',
+      title: a.title || '',
+      date_text: dateText
+    };
+  }));
   const seen = new Set();
   const links = [];
   for (const anchor of anchors) {
@@ -144,9 +159,30 @@ async function collectLinks(page) {
     const url = new URL(href, args.url).href.split('#')[0];
     if (seen.has(url)) continue;
     seen.add(url);
-    links.push({ title: spoilerLightTitle(text), url });
+    links.push({ title: spoilerLightTitle(text), url, date_text: anchor.date_text });
   }
   return links;
+}
+
+function parseDateFromText(dateText) {
+  const m = (dateText || '').match(/(\d{2})-(\d{2})/);
+  if (!m) return null;
+  const month = parseInt(m[1], 10);
+  const day = parseInt(m[2], 10);
+  const today = new Date();
+  let result = new Date(today.getFullYear(), month - 1, day);
+  // 跨年修正：如果解析出的日期在未来，说明是去年的
+  if (result > today) {
+    result = new Date(today.getFullYear() - 1, month - 1, day);
+  }
+  return result;
+}
+
+function formatDate(d) {
+  if (!d) return '';
+  return d.getFullYear() + '-' +
+    String(d.getMonth() + 1).padStart(2, '0') + '-' +
+    String(d.getDate()).padStart(2, '0');
 }
 
 function ask(question) {
@@ -159,7 +195,10 @@ function ask(question) {
 
 function printMatches(matches) {
   console.log('\n找到以下可观看的世界杯相关视频：');
-  matches.forEach((match, index) => console.log(`${index + 1}. ${match.title}`));
+  matches.forEach((match, index) => {
+    const dateStr = match.match_date ? ` [${formatDate(match.match_date)}]` : '';
+    console.log(`${index + 1}.${dateStr} ${match.title}`);
+  });
 }
 
 async function chooseMatch(matches, directIndex) {
@@ -275,6 +314,46 @@ async function bringToForeground(page) {
   const matches = await collectLinks(headlessPage);
   await headlessBrowser.close();
 
+  // ── 按日期过滤 ──
+  if (!args.show_all && args.days !== undefined && args.days !== null && args.days >= 0) {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const startDate = new Date(today);
+    startDate.setDate(startDate.getDate() - args.days);
+    const endDate = new Date(today);
+    endDate.setDate(endDate.getDate() - 1);
+    if (args.days === 0) {
+      startDate.setDate(today.getDate());
+      endDate.setDate(today.getDate());
+    }
+    const beforeCount = matches.length;
+    const filtered = matches.filter(m => {
+      if (!m.date_text) return true;
+      const d = parseDateFromText(m.date_text);
+      if (!d) return true;
+      m.match_date = d;
+      return d >= startDate && d <= endDate;
+    });
+    // 同时为有 date_text 的匹配设置 match_date
+    matches.forEach(m => {
+      if (!m.match_date && m.date_text) {
+        m.match_date = parseDateFromText(m.date_text);
+      }
+    });
+    if (beforeCount > filtered.length) {
+      console.log(`从 ${beforeCount} 场中过滤出 ${filtered.length} 场（日期范围: ${formatDate(startDate)} ~ ${formatDate(endDate)}）`);
+    }
+    matches.length = 0;
+    matches.push(...filtered);
+  } else {
+    // 即使不过滤，也解析日期用于显示
+    matches.forEach(m => {
+      if (m.date_text) {
+        m.match_date = parseDateFromText(m.date_text);
+      }
+    });
+  }
+
   if (!matches.length) {
     console.log('没有找到带回放/集锦标记的世界杯视频。你可以加 --show-all 再试一次。');
     process.exit(1);
@@ -355,6 +434,8 @@ def run_with_node(args: argparse.Namespace) -> int:
             "visible": args.visible,
             "fullscreen": args.fullscreen,
             "timeout": args.timeout,
+            "days": args.days,
+            "list_only": args.list_only,
         },
         ensure_ascii=False,
     )
@@ -414,7 +495,46 @@ def dedupe_links(items: Iterable[MatchLink]) -> list[MatchLink]:
     return result
 
 
+def _parse_date_from_text(date_text: str) -> date | None:
+    """从 '06-15 星期一' 或 '06-16 今天' 中解析日期。"""
+    m = re.search(r"(\d{2})-(\d{2})", date_text)
+    if not m:
+        return None
+    month, day = int(m.group(1)), int(m.group(2))
+    today = date.today()
+    result = date(today.year, month, day)
+    # 跨年修正：如果解析出的日期在未来，说明是去年的
+    if result > today:
+        result = date(today.year - 1, month, day)
+    return result
+
+
+def _extract_date_from_anchor(page, anchor_index: int) -> date | None:
+    """从 anchor 的父级 .section-container 中提取日期。"""
+    try:
+        date_text = page.evaluate(
+            """([idx]) => {
+                const anchors = document.querySelectorAll('a');
+                const a = anchors[idx];
+                if (!a) return '';
+                let p = a;
+                while (p) {
+                    if (p.classList && p.classList.contains('section-container')) {
+                        return (p.innerText || '').substring(0, 80);
+                    }
+                    p = p.parentElement;
+                }
+                return '';
+            }""",
+            [anchor_index],
+        )
+        return _parse_date_from_text(date_text)
+    except Exception:
+        return None
+
+
 def collect_links(page, base_url: str, show_all: bool) -> list[MatchLink]:
+    """收集页面中的世界杯回放链接，同时提取日期信息。"""
     anchors = page.locator("a").evaluate_all(
         """els => els.map(a => ({
             text: (a.innerText || a.textContent || a.title || '').trim(),
@@ -423,7 +543,7 @@ def collect_links(page, base_url: str, show_all: bool) -> list[MatchLink]:
         }))"""
     )
     links: list[MatchLink] = []
-    for anchor in anchors:
+    for idx, anchor in enumerate(anchors):
         text = normalize_text(anchor.get("text") or anchor.get("title") or "")
         href = anchor.get("href") or ""
         if not text or not href or href.startswith("javascript:"):
@@ -432,14 +552,22 @@ def collect_links(page, base_url: str, show_all: bool) -> list[MatchLink]:
             continue
         if not looks_like_video(text, href, show_all):
             continue
-        links.append(MatchLink(title=spoiler_light_title(text), url=urljoin(base_url, href)))
+        match_date = _extract_date_from_anchor(page, idx)
+        links.append(
+            MatchLink(
+                title=spoiler_light_title(text),
+                url=urljoin(base_url, href),
+                match_date=match_date,
+            )
+        )
     return dedupe_links(links)
 
 
 def choose_match(matches: list[MatchLink], direct_index: int | None = None) -> MatchLink | None:
     print("\n找到以下可观看的世界杯相关视频：")
     for index, match in enumerate(matches, start=1):
-        print(f"{index}. {match.title}")
+        date_str = f" [{match.match_date}]" if match.match_date else ""
+        print(f"{index}.{date_str} {match.title}")
 
     if direct_index is not None:
         if 1 <= direct_index <= len(matches):
@@ -762,6 +890,22 @@ def run(args: argparse.Namespace) -> int:
         matches = collect_links(page, args.url, args.show_all)
         browser.close()
 
+    # ── 按日期过滤 ──
+    if not args.show_all and args.days is not None and args.days >= 0:
+        today = date.today()
+        start_date = today - timedelta(days=args.days)
+        end_date = today - timedelta(days=1)
+        if args.days == 0:
+            start_date = today
+            end_date = today
+        before_count = len(matches)
+        matches = [
+            m for m in matches
+            if m.match_date is None or (start_date <= m.match_date <= end_date)
+        ]
+        if before_count > len(matches):
+            print(f"从 {before_count} 场中过滤出 {len(matches)} 场（日期范围: {start_date} ~ {end_date}）")
+
     if not matches:
         print("没有找到带回放/集锦标记的世界杯视频。你可以加 --show-all 再试一次。")
         return 1
@@ -770,7 +914,8 @@ def run(args: argparse.Namespace) -> int:
     if args.list_only:
         print("\n找到以下可观看的世界杯相关视频：")
         for index, match in enumerate(matches, start=1):
-            print(f"{index}. {match.title}")
+            date_str = f" [{match.match_date}]" if match.match_date else ""
+            print(f"{index}.{date_str} {match.title}")
         return 0
 
     if args.play is not None and args.play != -1:
@@ -874,6 +1019,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--timeout", type=int, default=30000, help="页面等待超时，单位毫秒")
     parser.add_argument("--fullscreen", action="store_true", help="网页全屏模式（替代默认画中画），全屏后浏览器弹到前台")
     parser.add_argument("--visible", action="store_true", help="调试模式：浏览器全程可见，不最小化")
+    parser.add_argument(
+        "--days", type=int, default=1,
+        help="显示最近 N 天的比赛（默认 1 = 前一天）。0 = 仅今天，1 = 前一天，3 = 最近 3 天。",
+    )
     return parser.parse_args(argv)
 
 

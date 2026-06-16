@@ -28,11 +28,12 @@ If the default `uv` cache under `AppData` has Windows permission issues, add `--
 
 ## Workflow
 
-1. **Phase 1 — Headless collection**: Opens CCTV Sports in a headless browser, searches for World Cup match links containing replay terms (`集锦`, `回放`, `全场`, etc.), filters out live streams and noise.
-2. **Spoiler-free listing**: Prints numbered options with scores hidden (`[比分已隐藏]`) — both dash-format (`2-0`) and CCTV space-format (`墨西哥 2 南非 0`) scores are masked.
-3. **User selection**: Asks the user to enter a match number, or can skip with `--play N`.
-4. **Replay direct URL**: Searches all frames (including iframes) for the replay tab's direct URL, navigates to it — bypasses the highlights tab entirely.
-5. **Phase 2 — Offscreen playback**: Launches a visible browser minimized + offscreen, starts the video, then:
+1. **Phase 1 — Headless collection**: Opens CCTV Sports in a headless browser, searches for World Cup match links containing replay terms (`集锦`, `回放`, `全场`, etc.), filters out live streams and noise. Extracts match date from the page's `section-container` elements (format `MM-DD`).
+2. **Date filtering**: By default, only shows matches from yesterday (`--days 1`). Use `--days N` to show matches from the last N days, or `--days 0` for today only. Add `--show-all` to skip date filtering.
+3. **Spoiler-free listing**: Prints numbered options with scores hidden (`[比分已隐藏]`) — both dash-format (`2-0`) and CCTV space-format (`墨西哥 2 南非 0`) scores are masked. Each match shows its date.
+4. **User selection**: Asks the user to enter a match number, or can skip with `--play N`.
+5. **Replay direct URL**: Searches all frames (including iframes) for the replay tab's direct URL, navigates to it — bypasses the highlights tab entirely.
+6. **Phase 2 — Offscreen playback**: Launches a visible browser minimized + offscreen, starts the video, then:
    - **Default: Picture-in-Picture** — video pops out as a floating window, browser stays hidden (zero spoiler exposure).
    - **`--fullscreen`: Web fullscreen** — presses F for fullscreen then brings browser to foreground.
 
@@ -59,6 +60,15 @@ uv run python scripts/open_cctv_worldcup_replay.py --visible
 
 # Wider search
 uv run python scripts/open_cctv_worldcup_replay.py --show-all
+
+# Date filter: yesterday only (default, same as --days 1)
+uv run python scripts/open_cctv_worldcup_replay.py --list-only
+
+# Date filter: today only
+uv run python scripts/open_cctv_worldcup_replay.py --list-only --days 0
+
+# Date filter: last 3 days
+uv run python scripts/open_cctv_worldcup_replay.py --list-only --days 3
 
 # Custom timeout (ms)
 uv run python scripts/open_cctv_worldcup_replay.py --timeout 60000
