@@ -1,0 +1,8 @@
+[project]
+name = "watch-worldcup-replay"
+version = "0.1.0"
+description = "Open spoiler-light CCTV World Cup replay videos."
+requires-python = ">=3.10"
+dependencies = [
+  "playwright>=1.45",
+]
